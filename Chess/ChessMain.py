@@ -1,9 +1,14 @@
 import pygame as p
-from Chess import ChessEngine
+import ChessEngine, ChessIA
+from multiprocessing import Process, Queue
 
-WIDTH = HEIGHT = 512
+BOARD_WIDTH = BOARD_HEIGHT = 512  # ou 400
+
+MOVE_LOG_PANEL_WIDTH = 250
+MOVE_LOG_PANEL_HEIGHT = BOARD_HEIGHT
+
 DIMENSION = 8  # dimension 8x8
-SQ_SIZE = HEIGHT // DIMENSION
+SQ_SIZE = BOARD_HEIGHT // DIMENSION
 MAX_FPS = 15  # pour animations
 IMAGES = {}
 
@@ -21,9 +26,11 @@ def loadImages():
 # Le programme principal
 def main():
     p.init()
-    screen = p.display.set_mode((WIDTH, HEIGHT))
+    screen = p.display.set_mode((BOARD_WIDTH + MOVE_LOG_PANEL_WIDTH, BOARD_HEIGHT))
     clock = p.time.Clock()
     screen.fill(p.Color("white"))
+    movelogFont = p.font.SysFont("Helvitca", 20, False, False)
+
     gs = ChessEngine.GameState()
     validMoves = gs.getValidMoves()
     moveMade = False  # variable quand un coups est fait
@@ -34,7 +41,15 @@ def main():
     playerClicks = []  # garde les click du joueur
     gameOver = False
 
+    player1 = True  # si Humain joue les blans alors True, si c'est IA c'est False / False pour que les deux IA jouent
+    player2 = False  # si humain joue les noirs alors False, si c'est IA c'est True
+
+    IAThinking = False
+    moveFinderProcess = None
+    moveUndo = False
+
     while running:
+        humanTurn = (gs.whiteToMove and player1) or (not gs.whiteToMove and player2)
         for e in p.event.get():
             if e.type == p.QUIT:
                 running = False
@@ -44,16 +59,15 @@ def main():
                     location = p.mouse.get_pos()  # (x,y) location de la souris
                     col = location[0] // SQ_SIZE
                     row = location[1] // SQ_SIZE
-                    if sqSelected == (row, col) or col >= 8:  # l'utilisateur a appuyé sur la meme case deux fois
+                    if sqSelected == (row, col) or col >= 8:  # click 2 fois sur la mm case ou click la partie droite
                         sqSelected = ()
                         playerClicks = []
                     else:
                         sqSelected = (row, col)
                         playerClicks.append(sqSelected)
 
-                    if len(playerClicks) == 2:  # apres le 2eme click
+                    if len(playerClicks) == 2 and humanTurn:  # apres le 2eme click
                         move = ChessEngine.Move(playerClicks[0], playerClicks[1], gs.board)
-                        print(move.getChessNotation())
                         for i in range(len(validMoves)):
                             if move == validMoves[i]:
                                 gs.makeMove(validMoves[i])
@@ -70,6 +84,11 @@ def main():
                     gs.undoMove()
                     moveMade = True
                     animate = False
+                    gameOver = False
+                    if IAThinking:
+                        moveFinderProcess.terminate()
+                        IAThinking = False
+                    moveUndo = True
                 if e.key == p.K_r:  # recommence la partie quand r est pressé
                     gs = ChessEngine.GameState()
                     validMoves = gs.getValidMoves()
@@ -77,6 +96,28 @@ def main():
                     playerClicks = []
                     moveMade = False
                     animate = False
+                    gameOver = False
+                    if IAThinking:
+                        moveFinderProcess.terminate()
+                        IAThinking = False
+                    moveUndo = True
+
+        # IA trouvé les coups
+        if not gameOver and not humanTurn and not moveUndo:
+            if not IAThinking:
+                IAThinking = True
+                returnQueue = Queue()  # utilisée pour passer les data entre les fils
+                moveFinderProcess = Process(target=ChessIA.findBestMove, args=(gs, validMoves, returnQueue))
+                moveFinderProcess.start()  # exécute findBestMove()
+
+            if not moveFinderProcess.is_alive():
+                IAMove = returnQueue.get()
+                if IAMove is None:
+                    IAMove = ChessIA.findRandomMove(validMoves)
+                gs.makeMove(IAMove)
+                moveMade = True
+                animate = True
+                IAThinking = False
 
         if moveMade:
             if animate:
@@ -84,21 +125,40 @@ def main():
             validMoves = gs.getValidMoves()
             moveMade = False
             animate = False
+            moveUndo = False
 
-        drawGameState(screen, gs, validMoves, sqSelected)
+        drawGameState(screen, gs, validMoves, sqSelected, movelogFont)
 
         if gs.checkmate:
             gameOver = True
             if gs.whiteToMove:
-                drawText(screen, 'Échec et mat, victoire des noirs')
+                drawEndGameText(screen, 'Échec et mat, victoire des noirs')
             else:
-                drawText(screen, 'Échec et mat, victoire des blancs')
+                drawEndGameText(screen, 'Échec et mat, victoire des blancs')
         elif gs.stalemate:
             gameOver = True
-            drawText(screen, 'Pat, égalité')
+            drawEndGameText(screen, 'Pat, égalité')
 
         clock.tick(MAX_FPS)
         p.display.flip()
+
+
+# Responsable des graphiques
+def drawGameState(screen, gs, validMoves, sqSelected, moveLogFont):
+    drawBoard(screen)  # Dessine les cases
+    highlightSquares(screen, gs, validMoves, sqSelected)
+    drawPieces(screen, gs.board)  # Dessine les pièces
+    drawMoveLog(screen, gs, moveLogFont)
+
+
+# Dessine les cases
+def drawBoard(screen):
+    global colors
+    colors = [p.Color("antiquewhite1"), p.Color("tan4")]
+    for r in range(DIMENSION):
+        for c in range(DIMENSION):
+            color = colors[((r + c) % 2)]
+            p.draw.rect(screen, color, p.Rect(c * SQ_SIZE, r * SQ_SIZE, SQ_SIZE, SQ_SIZE))
 
 
 # Surligne la case séléctionnée et les cases possibles
@@ -119,23 +179,6 @@ def highlightSquares(screen, gs, validMoves, sqSelected):
                     screen.blit(s, (move.endCol * SQ_SIZE, move.endRow * SQ_SIZE))
 
 
-# Responsable des graphiques
-def drawGameState(screen, gs, validMoves, sqSelected):
-    drawBoard(screen)  # Dessine les cases
-    highlightSquares(screen, gs, validMoves, sqSelected)
-    drawPieces(screen, gs.board)  # Dessine les pièces
-
-
-# Dessine les cases
-def drawBoard(screen):
-    global colors
-    colors = [p.Color("antiquewhite1"), p.Color("tan4")]
-    for r in range(DIMENSION):
-        for c in range(DIMENSION):
-            color = colors[((r + c) % 2)]
-            p.draw.rect(screen, color, p.Rect(c * SQ_SIZE, r * SQ_SIZE, SQ_SIZE, SQ_SIZE))
-
-
 # Dessine les pièces
 def drawPieces(screen, board):
     for r in range(DIMENSION):
@@ -143,6 +186,35 @@ def drawPieces(screen, board):
             piece = board[r][c]
             if piece != "--":  # pas les cases vides
                 screen.blit(IMAGES[piece], p.Rect(c * SQ_SIZE, r * SQ_SIZE, SQ_SIZE, SQ_SIZE))
+
+
+# écrit les coups joués
+def drawMoveLog(screen, gs, font):
+    moveLogRect = p.Rect(BOARD_WIDTH, 0, MOVE_LOG_PANEL_WIDTH, MOVE_LOG_PANEL_HEIGHT)
+    p.draw.rect(screen, p.Color("indianred4"), moveLogRect)
+    moveLog = gs.moveLog
+    moveTexts = []
+
+    for i in range(0, len(moveLog), 2):
+        moveString = str(i // 2 + 1) + ". " + str(moveLog[i]) + " "
+        if i + 1 < len(moveLog):  # on s'assure que les noirs ont fait un coup
+            moveString += str(moveLog[i + 1]) + "  "
+        moveTexts.append(moveString)
+
+    movesPerRow = 3  # peut être changé
+    padding = 5
+    lineSpacing = 2
+    textY = padding
+    for i in range(0, len(moveTexts), movesPerRow):
+        text = ""
+        for j in range(movesPerRow):
+            if i + j < len(moveTexts):
+                text += moveTexts[i+j]
+
+        textObject = font.render(text, False, p.Color('cornsilk'))
+        textLocation = moveLogRect.move(padding, textY)
+        screen.blit(textObject, textLocation)
+        textY += textObject.get_height() + lineSpacing
 
 
 # Animation
@@ -162,18 +234,22 @@ def animateMoves(move, screen, board, clock):
         p.draw.rect(screen, color, endSquare)
         # dessine la pièce capturée dans un rectangle
         if move.pieceCaptured != '--':
+            if move.isEnpassantMove:
+                enPassantRow = move.endRow + 1 if move.pieceCaptured[0] == 'b' else move.endRow - 1
+                endSquare = p.Rect(move.endCol * SQ_SIZE, enPassantRow * SQ_SIZE, SQ_SIZE, SQ_SIZE)
             screen.blit(IMAGES[move.pieceCaptured], endSquare)
         # dessine la pièce qui bouge
         screen.blit(IMAGES[move.pieceMoved], p.Rect(c * SQ_SIZE, r * SQ_SIZE, SQ_SIZE, SQ_SIZE))
         p.display.flip()
-        clock.tick(75)  # vitesse
+        clock.tick(60)  # vitesse
 
 
-def drawText(screen, text):
+# Ce qui va être affiché en fin de partie
+def drawEndGameText(screen, text):
     font = p.font.SysFont("arial", 32, True, False)
     textObject = font.render(text, False, p.Color('Gray'))
-    textLocation = p.Rect(0, 0, WIDTH, HEIGHT).move(WIDTH / 2 - textObject.get_width() / 2,
-                                                    HEIGHT / 2 - textObject.get_height() / 2)
+    textLocation = p.Rect(0, 0, BOARD_WIDTH, BOARD_HEIGHT).move(BOARD_WIDTH / 2 - textObject.get_width() / 2,
+                                                                BOARD_HEIGHT / 2 - textObject.get_height() / 2)
     screen.blit(textObject, textLocation)
     textObject = font.render(text, False, p.Color("Black"))
     screen.blit(textObject, textLocation.move(2, 2))
